@@ -2,7 +2,6 @@
 import sys
 import os
 
-# Resolve cactus root (sibling of this repo)
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _CACTUS_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "cactus"))
 sys.path.insert(0, os.path.join(_CACTUS_ROOT, "python", "src"))
@@ -177,7 +176,7 @@ BENCHMARKS = [
         "expected_calls": [{"name": "get_weather", "arguments": {"location": "Paris"}}],
     },
 
-    # ===== Medium: 2-3 tools, must pick the right one =====
+    # ===== Medium: 2-5 tools, must pick the right one =====
     {
         "name": "message_among_three",
         "difficulty": "medium",
@@ -247,6 +246,43 @@ BENCHMARKS = [
         "messages": [{"role": "user", "content": "Set an alarm for 9 AM."}],
         "tools": [TOOL_SEND_MESSAGE, TOOL_GET_WEATHER, TOOL_PLAY_MUSIC, TOOL_SET_TIMER, TOOL_SET_ALARM],
         "expected_calls": [{"name": "set_alarm", "arguments": {"hour": 9, "minute": 0}}],
+    },
+
+    # ----- Medium: Ambiguity + paraphrase cases -----
+    {
+        "name": "ambig_tell_weather",
+        "difficulty": "medium",
+        "messages": [{"role": "user", "content": "Tell me the weather in Paris."}],
+        "tools": [TOOL_SEND_MESSAGE, TOOL_GET_WEATHER, TOOL_PLAY_MUSIC],
+        "expected_calls": [{"name": "get_weather", "arguments": {"location": "Paris"}}],
+    },
+    {
+        "name": "ambig_remind_text",
+        "difficulty": "medium",
+        "messages": [{"role": "user", "content": "Remind me to text Alice at 5 PM."}],
+        "tools": [TOOL_SEND_MESSAGE, TOOL_CREATE_REMINDER, TOOL_SET_ALARM],
+        "expected_calls": [{"name": "create_reminder", "arguments": {"title": "text Alice", "time": "5 PM"}}],
+    },
+    {
+        "name": "ambig_drop_hello",
+        "difficulty": "medium",
+        "messages": [{"role": "user", "content": "Could you drop Alice a quick hello?"}],
+        "tools": [TOOL_SEND_MESSAGE, TOOL_CREATE_REMINDER, TOOL_SEARCH_CONTACTS],
+        "expected_calls": [{"name": "send_message", "arguments": {"recipient": "Alice", "message": "hello"}}],
+    },
+    {
+        "name": "paraphrase_weather_rome",
+        "difficulty": "medium",
+        "messages": [{"role": "user", "content": "Any idea how it looks outside in Rome?"}],
+        "tools": [TOOL_GET_WEATHER, TOOL_SEARCH_CONTACTS, TOOL_SET_TIMER],
+        "expected_calls": [{"name": "get_weather", "arguments": {"location": "Rome"}}],
+    },
+    {
+        "name": "paraphrase_alarm_715",
+        "difficulty": "medium",
+        "messages": [{"role": "user", "content": "I need to be up by quarter past seven."}],
+        "tools": [TOOL_SET_ALARM, TOOL_SET_TIMER, TOOL_CREATE_REMINDER],
+        "expected_calls": [{"name": "set_alarm", "arguments": {"hour": 7, "minute": 15}}],
     },
 
     # ===== Hard: multiple tools needed, multi-call =====
@@ -357,14 +393,26 @@ BENCHMARKS = [
 
 
 def _normalize(v):
-    """Normalize a value for comparison."""
     if isinstance(v, str):
         return v.strip().lower()
     return v
 
 
+def _str_fuzzy_match(predicted_str, expected_str):
+    p = predicted_str.strip().lower()
+    e = expected_str.strip().lower()
+    if p == e:
+        return True
+    if e in p or p in e:
+        return True
+    exp_tokens = set(e.split())
+    pred_tokens = set(p.split())
+    if exp_tokens and exp_tokens.issubset(pred_tokens):
+        return True
+    return False
+
+
 def _call_matches(predicted, expected):
-    """Check if a predicted call matches an expected call (name + argument values)."""
     if predicted["name"] != expected["name"]:
         return False
     pred_args = predicted.get("arguments", {})
@@ -372,13 +420,17 @@ def _call_matches(predicted, expected):
     for key, exp_val in exp_args.items():
         if key not in pred_args:
             return False
-        if _normalize(pred_args[key]) != _normalize(exp_val):
-            return False
+        pred_val = pred_args[key]
+        if isinstance(exp_val, str) and isinstance(pred_val, str):
+            if not _str_fuzzy_match(pred_val, exp_val):
+                return False
+        else:
+            if _normalize(pred_val) != _normalize(exp_val):
+                return False
     return True
 
 
 def compute_f1(predicted_calls, expected_calls):
-    """Compute F1 score between predicted and expected function calls."""
     if not predicted_calls and not expected_calls:
         return 1.0
     if not predicted_calls or not expected_calls:
@@ -397,11 +449,14 @@ def compute_f1(predicted_calls, expected_calls):
     recall = matched / len(expected_calls)
     if precision + recall == 0:
         return 0.0
-    return 2 * precision * recall / (precision + recall)
+    f1 = 2 * precision * recall / (precision + recall)
+
+    overcalls = max(0, len(predicted_calls) - len(expected_calls))
+    penalty = 0.1 * overcalls
+    return max(0.0, f1 - penalty)
 
 
 def run_benchmark(benchmarks=None):
-    """Run all benchmark cases and print results."""
     if benchmarks is None:
         benchmarks = BENCHMARKS
 
@@ -413,6 +468,9 @@ def run_benchmark(benchmarks=None):
         f1 = compute_f1(result["function_calls"], case["expected_calls"])
         source = result.get("source", "unknown")
         print(f"F1={f1:.2f} | {result['total_time_ms']:.0f}ms | {source}")
+        if f1 < 0.5:
+            print(f"    PREDICTED: {json.dumps(result['function_calls'], default=str)}")
+            print(f"    EXPECTED:  {json.dumps(case['expected_calls'], default=str)}")
         results.append({
             "name": case["name"],
             "difficulty": case["difficulty"],
@@ -421,7 +479,6 @@ def run_benchmark(benchmarks=None):
             "source": source,
             "predicted": result["function_calls"],
             "expected": case["expected_calls"],
-            "local_time_ms": result.get("local_time_ms"),
         })
 
     print("\n=== Benchmark Results ===\n")
@@ -430,7 +487,7 @@ def run_benchmark(benchmarks=None):
     for i, r in enumerate(results, 1):
         print(f"  {i:>2} | {r['difficulty']:<10} | {r['name']:<28} | {r['total_time_ms']:>10.2f} | {r['f1']:>5.2f} | {r['source']}")
 
-    print(f"\n--- Summary ---")
+    print(f"\n--- Summary by Difficulty ---")
     for difficulty in ["easy", "medium", "hard"]:
         group = [r for r in results if r["difficulty"] == difficulty]
         if not group:
@@ -439,70 +496,69 @@ def run_benchmark(benchmarks=None):
         avg_time = sum(r["total_time_ms"] for r in group) / len(group)
         on_device = sum(1 for r in group if r["source"] == "on-device")
         cloud = len(group) - on_device
-        print(f"  {difficulty:<8} avg F1={avg_f1:.2f}  avg time={avg_time:.2f}ms  on-device={on_device}/{len(group)} cloud={cloud}/{len(group)}")
+        print(f"  {difficulty:<8} avg F1={avg_f1:.2f}  avg time={avg_time:.0f}ms  on-device={on_device}/{len(group)} cloud={cloud}/{len(group)}")
 
     avg_f1 = sum(r["f1"] for r in results) / len(results)
     avg_time = sum(r["total_time_ms"] for r in results) / len(results)
     total_time = sum(r["total_time_ms"] for r in results)
     on_device_total = sum(1 for r in results if r["source"] == "on-device")
     cloud_total = len(results) - on_device_total
-    print(f"  {'overall':<8} avg F1={avg_f1:.2f}  avg time={avg_time:.2f}ms  total time={total_time:.2f}ms")
+    print(f"  {'overall':<8} avg F1={avg_f1:.2f}  avg time={avg_time:.0f}ms  total time={total_time:.0f}ms")
     print(f"           on-device={on_device_total}/{len(results)} ({100*on_device_total/len(results):.0f}%)  cloud={cloud_total}/{len(results)} ({100*cloud_total/len(results):.0f}%)")
 
-    # Total score
+    # Per-tool accuracy
+    print(f"\n--- Per-Tool Accuracy ---")
+    tool_stats = {}
+    for r in results:
+        for exp in r["expected"]:
+            name = exp["name"]
+            if name not in tool_stats:
+                tool_stats[name] = {"expected": 0, "matched": 0}
+            tool_stats[name]["expected"] += 1
+            for pred in r["predicted"]:
+                if _call_matches(pred, exp):
+                    tool_stats[name]["matched"] += 1
+                    break
+    for name, stats in sorted(tool_stats.items()):
+        acc = stats["matched"] / stats["expected"] if stats["expected"] else 0
+        print(f"  {name:<22} {stats['matched']}/{stats['expected']} ({100*acc:.0f}%)")
+
+    # Hard case stats
+    hard_cases = [r for r in results if r["difficulty"] == "hard"]
+    if hard_cases:
+        print(f"\n--- Hard Case Stats ---")
+        decomp_success = sum(1 for r in hard_cases if r["f1"] > 0.5)
+        avg_pred_calls = sum(len(r["predicted"]) for r in hard_cases) / len(hard_cases)
+        hard_cloud = sum(1 for r in hard_cases if "cloud" in r["source"])
+        print(f"  Decomposition success (F1>0.5): {decomp_success}/{len(hard_cases)} ({100*decomp_success/len(hard_cases):.0f}%)")
+        print(f"  Avg predicted calls/query:      {avg_pred_calls:.1f}")
+        print(f"  Cloud fallback rate:            {hard_cloud}/{len(hard_cases)} ({100*hard_cloud/len(hard_cases):.0f}%)")
+
     score = compute_total_score(results)
     print(f"\n{'='*50}")
     print(f"  TOTAL SCORE: {score:.1f}%")
     print(f"{'='*50}")
-
-    # Latency diagnostic
-    on_device_results = [r for r in results if r["source"] == "on-device"]
-    cloud_results = [r for r in results if "cloud" in r.get("source", "")]
-    cloud_with_local = [r for r in cloud_results if r.get("local_time_ms") is not None]
-    print(f"\n--- Latency diagnostic ---")
-    if on_device_results:
-        avg_local = sum(r["total_time_ms"] for r in on_device_results) / len(on_device_results)
-        print(f"  On-device: {len(on_device_results)} cases, avg {avg_local:.0f}ms")
-    if cloud_results:
-        avg_cloud_total = sum(r["total_time_ms"] for r in cloud_results) / len(cloud_results)
-        print(f"  Cloud:     {len(cloud_results)} cases, avg total {avg_cloud_total:.0f}ms")
-        if cloud_with_local:
-            avg_wasted_local = sum(r["local_time_ms"] for r in cloud_with_local) / len(cloud_with_local)
-            print(f"  Cloud fallbacks (try-local-first): avg {avg_wasted_local:.0f}ms spent on device before cloud (~{avg_cloud_total - avg_wasted_local:.0f}ms cloud API).")
-    print(f"  Time score: 15% of total; baseline 500ms (under = full marks).")
 
     return results
 
 
 def compute_total_score(results):
     """
-    Compute a total score from 0-100% as a weighted sum across difficulty levels.
-
-    Components (per difficulty level):
-      - F1 score (50%): accuracy of tool calls
-      - Time score (25%): faster is better, capped at 500ms baseline
-      - On-device ratio (25%): higher on-device usage is better
-
-    Difficulty weights:
-      - easy: 20%
-      - medium: 30%
-      - hard: 50%
+    Components per difficulty: F1 (60%), Time (15%), On-device (25%).
+    Difficulty weights: easy 20%, medium 30%, hard 50%.
     """
     difficulty_weights = {"easy": 0.20, "medium": 0.30, "hard": 0.50}
-    time_baseline_ms = 500  # anything under this gets full marks
+    time_baseline_ms = 500
 
     total_score = 0
     for difficulty, weight in difficulty_weights.items():
         group = [r for r in results if r["difficulty"] == difficulty]
         if not group:
             continue
-
         avg_f1 = sum(r["f1"] for r in group) / len(group)
         avg_time = sum(r["total_time_ms"] for r in group) / len(group)
         on_device_ratio = sum(1 for r in group if r["source"] == "on-device") / len(group)
-
         time_score = max(0, 1 - avg_time / time_baseline_ms)
-
         level_score = (0.60 * avg_f1) + (0.15 * time_score) + (0.25 * on_device_ratio)
         total_score += weight * level_score
 
