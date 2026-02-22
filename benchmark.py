@@ -1,6 +1,11 @@
 
-import sys, os
-sys.path.insert(0, "cactus/python/src")
+import sys
+import os
+
+# Resolve cactus root (sibling of this repo)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_CACTUS_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "cactus"))
+sys.path.insert(0, os.path.join(_CACTUS_ROOT, "python", "src"))
 os.environ["CACTUS_NO_CLOUD_TELE"] = "1"
 
 import json
@@ -416,6 +421,7 @@ def run_benchmark(benchmarks=None):
             "source": source,
             "predicted": result["function_calls"],
             "expected": case["expected_calls"],
+            "local_time_ms": result.get("local_time_ms"),
         })
 
     print("\n=== Benchmark Results ===\n")
@@ -448,6 +454,22 @@ def run_benchmark(benchmarks=None):
     print(f"\n{'='*50}")
     print(f"  TOTAL SCORE: {score:.1f}%")
     print(f"{'='*50}")
+
+    # Latency diagnostic
+    on_device_results = [r for r in results if r["source"] == "on-device"]
+    cloud_results = [r for r in results if "cloud" in r.get("source", "")]
+    cloud_with_local = [r for r in cloud_results if r.get("local_time_ms") is not None]
+    print(f"\n--- Latency diagnostic ---")
+    if on_device_results:
+        avg_local = sum(r["total_time_ms"] for r in on_device_results) / len(on_device_results)
+        print(f"  On-device: {len(on_device_results)} cases, avg {avg_local:.0f}ms")
+    if cloud_results:
+        avg_cloud_total = sum(r["total_time_ms"] for r in cloud_results) / len(cloud_results)
+        print(f"  Cloud:     {len(cloud_results)} cases, avg total {avg_cloud_total:.0f}ms")
+        if cloud_with_local:
+            avg_wasted_local = sum(r["local_time_ms"] for r in cloud_with_local) / len(cloud_with_local)
+            print(f"  Cloud fallbacks (try-local-first): avg {avg_wasted_local:.0f}ms spent on device before cloud (~{avg_cloud_total - avg_wasted_local:.0f}ms cloud API).")
+    print(f"  Time score: 15% of total; baseline 500ms (under = full marks).")
 
     return results
 

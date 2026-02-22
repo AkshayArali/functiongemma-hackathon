@@ -6,11 +6,16 @@ Usage:
 """
 
 import argparse
+import os
 import time
 import requests
 
 SERVER_URL = "https://cactusevals.ngrok.app"
 HEADERS = {"ngrok-skip-browser-warning": "true"}
+
+# Path to main.py: same directory as this script (works from any cwd)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MAIN_PY_PATH = os.path.join(_SCRIPT_DIR, "main.py")
 
 
 def submit(team, location):
@@ -19,7 +24,7 @@ def submit(team, location):
     print("=" * 60)
 
     try:
-        with open("main.py", "rb") as f:
+        with open(MAIN_PY_PATH, "rb") as f:
             resp = requests.post(
                 f"{SERVER_URL}/eval/submit",
                 data={"team": team, "location": location},
@@ -50,42 +55,61 @@ def submit(team, location):
     print(f"\nWaiting for evaluation to complete...\n")
 
     last_progress = ""
+    poll_interval = 3
+    max_status_failures = 20
+    status_failures = 0
     while True:
-        time.sleep(3)
-        resp = requests.get(
-            f"{SERVER_URL}/eval/status",
-            params={"id": submission_id},
-            headers=HEADERS,
-        )
+        time.sleep(poll_interval)
+        try:
+            resp = requests.get(
+                f"{SERVER_URL}/eval/status",
+                params={"id": submission_id},
+                headers=HEADERS,
+                timeout=15,
+            )
+        except (requests.exceptions.SSLError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            status_failures += 1
+            if status_failures >= max_status_failures:
+                print("\nConnection issues while waiting for results. Your submission was queued successfully.")
+                print(f"  Submission ID: {submission_id}")
+                print("  Check the leaderboard later for your score.")
+                return
+            print(f"  Network/SSL issue ({status_failures}/{max_status_failures}), retrying in {poll_interval}s...")
+            continue
+        status_failures = 0
+
         if resp.status_code != 200:
             print("Error polling status. Retrying...")
             continue
 
-        status = resp.json()
+        try:
+            status = resp.json()
+        except ValueError:
+            continue
 
-        if status["progress"] and status["progress"] != last_progress:
+        if status.get("progress") and status["progress"] != last_progress:
             last_progress = status["progress"]
             print(f"  [{status['progress']}]", flush=True)
 
-        if status["status"] == "complete":
-            result = status["result"]
+        if status.get("status") == "complete":
+            result = status.get("result", {})
             print(f"\n{'=' * 50}")
-            print(f"  RESULTS for team '{result['team']}'")
+            print(f"  RESULTS for team '{result.get('team', team)}'")
             print(f"{'=' * 50}")
-            print(f"  Total Score : {result['score']:.1f}%")
-            print(f"  Avg F1      : {result['f1']:.4f}")
-            print(f"  Avg Time    : {result['avg_time_ms']:.0f}ms")
-            print(f"  On-Device   : {result['on_device_pct']:.0f}%")
+            print(f"  Total Score : {result.get('score', 0):.1f}%")
+            print(f"  Avg F1      : {result.get('f1', 0):.4f}")
+            print(f"  Avg Time    : {result.get('avg_time_ms', 0):.0f}ms")
+            print(f"  On-Device   : {result.get('on_device_pct', 0):.0f}%")
             print(f"  Leaderboard : Updated!")
             print(f"{'=' * 50}")
             return
 
-        if status["status"] == "error":
+        if status.get("status") == "error":
             print(f"\nError: {status.get('error', 'Unknown error')}")
             return
 
-        if status["status"] == "queued":
-            print(f"  Queued (queue size: {status['queue_size']})...", end="\r", flush=True)
+        if status.get("status") == "queued":
+            print(f"  Queued (queue size: {status.get('queue_size', '?')})...", end="\r", flush=True)
 
 
 if __name__ == "__main__":
